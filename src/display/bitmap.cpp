@@ -639,6 +639,24 @@ Bitmap::Bitmap(int width, int height, bool isHires)
     if (width <= 0 || height <= 0)
         throw Exception(Exception::RGSSError, "failed to create bitmap");
     
+    p = new BitmapPrivate(this);
+
+    if (width > glState.caps.maxTexSize || height > glState.caps.maxTexSize) {
+        SDL_Surface *surface = SDL_CreateRGBSurface(0, width, height, p->format->BitsPerPixel,
+                                                    p->format->Rmask,
+                                                    p->format->Gmask,
+                                                    p->format->Bmask,
+                                                    p->format->Amask);
+
+        if (!surface)
+            throw Exception(Exception::SDLError, "Error creating Bitmap: %s",
+                            SDL_GetError());
+
+        p->megaSurface = surface;
+        SDL_SetSurfaceBlendMode(p->megaSurface, SDL_BLENDMODE_NONE);
+        return;
+    }
+
     Bitmap *hiresBitmap = nullptr;
 
     if (shState->config().enableHires && !isHires) {
@@ -658,14 +676,12 @@ Bitmap::Bitmap(int width, int height, bool isHires)
             delete hiresBitmap;
         throw e;
     }
-    
-    p = new BitmapPrivate(this);
     p->gl = tex;
     p->selfHires = hiresBitmap;
     if (p->selfHires != nullptr) {
         p->gl.selfHires = &p->selfHires->getGLTypes();
     }
-    
+
     clear();
 }
 
