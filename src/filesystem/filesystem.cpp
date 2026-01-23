@@ -357,40 +357,38 @@ struct CacheEnumData {
   std::stack<std::vector<std::string> *> fileLists;
 
 #ifdef __APPLE__
-  iconv_t nfd2nfc;
+  iconv_t nfc2nfd;
   char buf[512];
 #endif
 
   CacheEnumData(FileSystemPrivate *p) : p(p) {
 #ifdef __APPLE__
-    nfd2nfc = iconv_open("utf-8", "utf-8-mac");
+    nfc2nfd = iconv_open("utf-8-mac", "utf-8");
 #endif
   }
 
   ~CacheEnumData() {
 #ifdef __APPLE__
-    iconv_close(nfd2nfc);
+    iconv_close(nfc2nfd);
 #endif
   }
 
   /* Converts in-place */
-  void toNFC(char *inout) {
+  std::string toNorm(const char *input) {
 #ifdef __APPLE__
-    size_t srcSize = strlen(inout);
+    size_t srcSize = strlen(input);
     size_t bufSize = sizeof(buf);
     char *bufPtr = buf;
-    char *inoutPtr = inout;
 
     /* Reserve room for null terminator */
     --bufSize;
 
-    iconv(nfd2nfc, &inoutPtr, &srcSize, &bufPtr, &bufSize);
+    iconv(nfc2nfd, const_cast<char**>(&input), &srcSize, &bufPtr, &bufSize);
     /* Null-terminate */
     *bufPtr = 0;
-    strcpy(inout, buf);
-#else
-    (void)inout;
+    input = buf;
 #endif
+    return std::string(input);
   }
 };
 
@@ -408,10 +406,9 @@ static PHYSFS_EnumerateCallbackResult cacheEnumCB(void *d, const char *origdir,
     snprintf(fullPath, sizeof(fullPath), "%s/%s", origdir, fname);
 
   /* Deal with OSX' weird UTF-8 standards */
-  data.toNFC(fullPath);
+  data.toNorm(fullPath);
 
-  std::string mixedCase(fullPath);
-  std::string lowerCase = mixedCase;
+  std::string lowerCase = data.toNorm(fullPath);
   strTolower(lowerCase);
 
   PHYSFS_Stat stat;
@@ -430,12 +427,13 @@ static PHYSFS_EnumerateCallbackResult cacheEnumCB(void *d, const char *origdir,
      * traversing and append this filename to it */
     std::vector<std::string> &list = *data.fileLists.top();
 
-    std::string lowerFilename(fname);
+    /* Deal with OSX' weird UTF-8 standards */
+    std::string lowerFilename = data.toNorm(fname);
     strTolower(lowerFilename);
     list.push_back(lowerFilename);
 
     /* Add the lower -> mixed mapping of the file's full path */
-    data.p->pathCache.insert(lowerCase, mixedCase);
+    data.p->pathCache.insert(lowerCase, std::string(fullPath));
   }
 
   return PHYSFS_ENUM_OK;
