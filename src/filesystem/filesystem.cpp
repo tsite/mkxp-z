@@ -557,9 +557,8 @@ openReadEnumCB(void *d, const char *dirpath, const char *filename) {
    * to mixed case path */
   if (data.pathTrans) {
     /* Ignore files that are not present in the cache */
-    if (!data.pathTrans->contains(fullPath)) {
+    if (!data.pathTrans->contains(fullPath))
       return PHYSFS_ENUM_OK;
-    }
     fullPath = (*data.pathTrans)[fullPath].c_str();
   }
 
@@ -617,14 +616,13 @@ void FileSystem::openRead(OpenHandler &handler, const char *filename) {
 
   if (p->havePathCache) {
     openReadEnumCB(&data, dir, file);
-    if (!data.stopSearching && findExt(file) == nullptr) {
+    if (!data.stopSearching) {
       char buffer[512];
       for (const std::string& ext: p->extCache[filename_nm]) {
         snprintf(buffer, sizeof(buffer), "%s.%s", file, ext.c_str());
         openReadEnumCB(&data, dir, buffer);
-        if (data.stopSearching) {
+        if (data.stopSearching)
           break;
-        }
       }
     }
   } else {
