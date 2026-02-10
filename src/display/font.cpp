@@ -552,6 +552,7 @@ _TTF_Font *SharedFontState::getFont(std::string family,
 
 	if (req->empty())
 	{
+		printf("ERR: missing font %s\n", family.c_str());
 		/* Doesn't exist; use built-in font */
 		family = "";
 	}
