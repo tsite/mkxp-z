@@ -39,13 +39,8 @@ public:
 	           bool allowSymlinks);
 	~FileSystem();
 
-	void addPath(const char *path, const char *mountpoint = 0, bool reload = false);
-    void removePath(const char *path, bool reload = false);
-
-	/* Call these after the last 'addPath()' */
-	void createPathCache();
-    
-    void reloadPathCache();
+	void addPath(const char *path, const char *mountpoint = 0);
+    void removePath(const char *path);
 
 	/* Scans "Fonts/" and creates inventory of
 	 * available font assets */
@@ -76,11 +71,6 @@ public:
 
 	/* Does not perform extension supplementing */
 	bool exists(const char *filename);
-
-	const char *desensitize(const char *filename);
-
-private:
-	FileSystemPrivate *p;
 };
 
 extern const Uint32 SDL_RWOPS_PHYSFS;
