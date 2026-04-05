@@ -40,12 +40,10 @@
 #include <unistd.h>
 #include <vector>
 
-#ifdef __APPLE__
-#include <iconv.h>
-#endif
-
 #ifdef __WIN32__
 #include <direct.h>
+#define strncasecmp _strnicmp
+#define strcasecmp _stricmp
 #endif
 
 struct SDLRWIoContext {
@@ -262,50 +260,6 @@ static void initReadOps(PHYSFS_File *handle, SDL_RWops &ops, bool freeOnClose) {
 
 const Uint32 SDL_RWOPS_PHYSFS = SDL_RWOPS_UNKNOWN + 10;
 
-struct FileSystemPrivate {
-  /* Maps: lower case full filepath,
-   * To:   mixed case full filepath */
-  BoostHash<std::string, std::string> pathCache;
-
-  /* Maps: lower case filepath without an extension,
-   * To:   lower case list of extensions */
-  BoostHash<std::string, std::vector<std::string>> extCache;
-
-  /* This is for compatibility with games that take Windows'
-   * case insensitivity for granted */
-  bool havePathCache = false;
-
-#ifdef __APPLE__
-  iconv_t nfc2nfd = iconv_open("utf-8-mac", "utf-8");
-
-  ~FileSystemPrivate() {
-    iconv_close(nfc2nfd);
-  }
-#endif
-
-  std::string toNorm(const char *input) {
-#ifdef __APPLE__
-    /* Deal with OSX's weird UTF-8 standards */
-    size_t srcSize = strlen(input);
-    char buf[512];
-    size_t bufSize = sizeof(buf);
-    char *bufPtr = buf;
-
-    /* Reserve room for null terminator */
-    --bufSize;
-
-    iconv(nfc2nfd, const_cast<char**>(&input), &srcSize, &bufPtr, &bufSize);
-    /* Null-terminate */
-    *bufPtr = 0;
-    input = buf;
-#endif
-    std::string output(input);
-    for (char& c : output)
-      c = tolower(c);
-    return output;
-  }
-};
-
 static void throwPhysfsError(const char *desc) {
   PHYSFS_ErrorCode ec = PHYSFS_getLastErrorCode();
   const char *englishStr;
@@ -335,20 +289,16 @@ FileSystem::FileSystem(const char *argv0, bool allowSymlinks) {
   if (er == 0)
     throwPhysfsError("Error registering PhysFS RGSS archiver");
 
-  p = new FileSystemPrivate;
-
   if (allowSymlinks)
     PHYSFS_permitSymbolicLinks(1);
 }
 
 FileSystem::~FileSystem() {
-  delete p;
-
   if (PHYSFS_deinit() == 0)
     Debug() << "PhyFS failed to deinit.";
 }
 
-void FileSystem::addPath(const char *path, const char *mountpoint, bool reload) {
+void FileSystem::addPath(const char *path, const char *mountpoint) {
   /* Try the normal mount first */
     int state = PHYSFS_mount(path, mountpoint, 1);
   if (!state) {
@@ -363,81 +313,19 @@ void FileSystem::addPath(const char *path, const char *mountpoint, bool reload) 
         PHYSFS_ErrorCode err = PHYSFS_getLastErrorCode();
         throw Exception(Exception::PHYSFSError, "Failed to mount %s (%s)", path, PHYSFS_getErrorByCode(err));
     }
-    
-    if (reload) reloadPathCache();
 }
 
-void FileSystem::removePath(const char *path, bool reload) {
+void FileSystem::removePath(const char *path) {
     
     if (!PHYSFS_unmount(path)) {
         PHYSFS_ErrorCode err = PHYSFS_getLastErrorCode();
         throw Exception(Exception::PHYSFSError, "Failed to unmount %s (%s)", path, PHYSFS_getErrorByCode(err));
     }
-    
-    if (reload) reloadPathCache();
 }
-
-static PHYSFS_EnumerateCallbackResult cacheEnumCB(void *d, const char *origdir,
-                                                  const char *fname) {
-  FileSystemPrivate *p = static_cast<FileSystemPrivate *>(d);
-  if (shState && shState->rtData().rqTerm)
-    throw Exception(Exception::MKXPError, "Game close requested. Aborting path cache enumeration.");
-
-  char fullPath[512];
-
-  if (!*origdir)
-    snprintf(fullPath, sizeof(fullPath), "%s", fname);
-  else
-    snprintf(fullPath, sizeof(fullPath), "%s/%s", origdir, fname);
-
-  PHYSFS_Stat stat;
-  PHYSFS_stat(fullPath, &stat);
-
-  if (stat.filetype == PHYSFS_FILETYPE_DIRECTORY) {
-    /* Iterate over its contents */
-    PHYSFS_enumerate(fullPath, cacheEnumCB, p);
-  } else {
-    std::string normalized = p->toNorm(fullPath);
-    /* Add the normalized -> mixed mapping of the file's full path */
-    p->pathCache.insert(normalized, std::string(fullPath));
-    /* If the file has an extension, add a mapping with the extension removed */
-    const char* ext = findExt(normalized.c_str());
-    if (ext != nullptr) {
-      std::string extension(ext);
-      normalized.resize(ext - 1 - normalized.c_str());
-      p->extCache[normalized].push_back(extension);
-    }
-  }
-
-  return PHYSFS_ENUM_OK;
-}
-
-void FileSystem::createPathCache() {
-  Debug() << "Loading path cache...";
-
-  PHYSFS_enumerate("", cacheEnumCB, p);
-
-  p->havePathCache = true;
-
-  Debug() << "Path cache completed.";
-}
-
-void FileSystem::reloadPathCache() {
-    if (!p->havePathCache) return;
-    
-    p->pathCache.clear();
-    p->extCache.clear();
-    createPathCache();
-}
-
-struct FontSetsCBData {
-  FileSystemPrivate *p;
-  SharedFontState *sfs;
-};
 
 static PHYSFS_EnumerateCallbackResult fontSetEnumCB(void *data, const char *dir,
                                                     const char *fname) {
-  FontSetsCBData *d = static_cast<FontSetsCBData *>(data);
+  SharedFontState *sfs = static_cast<SharedFontState *>(data);
 
   /* Only consider filenames with font extensions */
   const char *ext = findExt(fname);
@@ -445,14 +333,7 @@ static PHYSFS_EnumerateCallbackResult fontSetEnumCB(void *data, const char *dir,
   if (!ext)
     return PHYSFS_ENUM_OK;
 
-  char lowExt[8];
-  size_t i;
-
-  for (i = 0; i < sizeof(lowExt) - 1 && ext[i]; ++i)
-    lowExt[i] = tolower(ext[i]);
-  lowExt[i] = '\0';
-
-  if (strcmp(lowExt, "ttf") && strcmp(lowExt, "otf"))
+  if (strcasecmp(ext, "ttf") && strcasecmp(ext, "otf"))
     return PHYSFS_ENUM_OK;
 
   char filename[512];
@@ -466,85 +347,91 @@ static PHYSFS_EnumerateCallbackResult fontSetEnumCB(void *data, const char *dir,
   SDL_RWops ops;
   initReadOps(handle, ops, false);
 
-  d->sfs->initFontSetCB(ops, filename);
+  sfs->initFontSetCB(ops, filename);
 
   SDL_RWclose(&ops);
 
   return PHYSFS_ENUM_OK;
 }
 
-/* Basically just a case-insensitive search
- * for the folder "Fonts"... */
-static PHYSFS_EnumerateCallbackResult
-findFontsFolderCB(void *data, const char *, const char *fname) {
-  size_t i = 0;
-  char buffer[512];
-  const char *s = fname;
+struct PhysfsCaseCBData {
+  PHYSFS_EnumerateCallback cb;
+  void *data;
+  std::string dir;
+  int offset;
+};
 
-  while (*s && i < sizeof(buffer))
-    buffer[i++] = tolower(*s++);
-
-  buffer[i] = '\0';
-
-  if (strcmp(buffer, "fonts") == 0)
-    PHYSFS_enumerate(fname, fontSetEnumCB, data);
-
+static PHYSFS_EnumerateCallbackResult PHYSFS_case_cb(void *data, const char *, const char *fname) {
+  PhysfsCaseCBData *cbd = static_cast<PhysfsCaseCBData *>(data);
+  assert(cbd->offset <= cbd->dir.length());
+  if (strcasecmp(&cbd->dir[cbd->offset], fname)) {
+    return PHYSFS_ENUM_OK;
+  }
+  if (cbd->offset > 0) {
+    assert(cbd->dir[cbd->offset-1] == 0);
+    cbd->dir[cbd->offset-1] = '/';
+  }
+  strcpy(&cbd->dir[cbd->offset], fname);
+  auto flen = strlen(fname);
+  if (cbd->dir.length() == cbd->offset + flen) {
+    PHYSFS_enumerate(cbd->dir.c_str(), cbd->cb, cbd->data);
+  } else {
+    cbd->offset += flen + 1;
+    PHYSFS_enumerate(cbd->dir.c_str(), PHYSFS_case_cb, cbd);
+    cbd->offset -= flen + 1;
+  }
+  if (cbd->offset > 0) {
+    assert(cbd->dir[cbd->offset-1] == '/');
+    cbd->dir[cbd->offset-1] = 0;
+  }
   return PHYSFS_ENUM_OK;
 }
 
-void FileSystem::initFontSets(SharedFontState &sfs) {
-  FontSetsCBData d = {p, &sfs};
+/* Case-insensitive enumerate. Dir string does not support trailing slashes. */
+static int PHYSFS_case_enumerate(const char *dir, PHYSFS_EnumerateCallback c, void *d) {
+  if (dir == nullptr || strlen(dir) == 0) {
+    return PHYSFS_enumerate(dir, c, d);
+  }
+  PhysfsCaseCBData data{c, d, dir, 0};
+  for (char &c : data.dir) if (c == '/') c = 0;
+  return PHYSFS_enumerate("", PHYSFS_case_cb, &data);
+}
 
-  PHYSFS_enumerate("", findFontsFolderCB, &d);
+void FileSystem::initFontSets(SharedFontState &sfs) {
+  PHYSFS_case_enumerate("fonts", fontSetEnumCB, &sfs);
 }
 
 struct OpenReadEnumData {
   FileSystem::OpenHandler &handler;
-  SDL_RWops ops;
+  SDL_RWops ops{};
 
   /* The filename (without directory) we're looking for */
-  const char *filename;
-  size_t filenameN;
-
-  /* Optional hash to translate full filepaths
-   * (used with path cache) */
-  BoostHash<std::string, std::string> *pathTrans;
+  const char *filename = nullptr;
+  size_t filenameN = 0;
 
   /* Number of files we've attempted to read and parse */
-  size_t matchCount;
-  bool stopSearching;
+  size_t matchCount = 0;
+  bool stopSearching = false;
 
   /* In case of a PhysFS error, save it here so it
    * doesn't get changed before we get back into our code */
-  const char *physfsError;
+  const char *physfsError = nullptr;
 
   OpenReadEnumData(FileSystem::OpenHandler &handler, const char *filename,
-                   size_t filenameN,
-                   BoostHash<std::string, std::string> *pathTrans)
-      : handler(handler), filename(filename), filenameN(filenameN),
-        pathTrans(pathTrans), matchCount(0), stopSearching(false),
-        physfsError(0) {}
+                   size_t filenameN)
+      : handler(handler), filename(filename), filenameN(filenameN) {}
 };
 
 static PHYSFS_EnumerateCallbackResult
 openReadEnumCB(void *d, const char *dirpath, const char *filename) {
   OpenReadEnumData &data = *static_cast<OpenReadEnumData *>(d);
-  char buffer[512];
-  const char *fullPath;
-
   if (data.stopSearching)
     return PHYSFS_ENUM_STOP;
 
-  /* If there's not even a partial match, continue searching */
-  if (strncmp(filename, data.filename, data.filenameN) != 0)
-    return PHYSFS_ENUM_OK;
 
-  if (!*dirpath) {
-    fullPath = filename;
-  } else {
-    snprintf(buffer, sizeof(buffer), "%s/%s", dirpath, filename);
-    fullPath = buffer;
-  }
+  /* If there's not even a partial match, continue searching */
+  if (strncasecmp(filename, data.filename, data.filenameN) != 0)
+    return PHYSFS_ENUM_OK;
 
   char last = filename[data.filenameN];
   /* If fname matches up to a following '.' (meaning the rest is part
@@ -553,13 +440,13 @@ openReadEnumCB(void *d, const char *dirpath, const char *filename) {
   if (last != '.' && last != '\0')
     return PHYSFS_ENUM_OK;
 
-  /* If the path cache is active, translate from lower case
-   * to mixed case path */
-  if (data.pathTrans) {
-    /* Ignore files that are not present in the cache */
-    if (!data.pathTrans->contains(fullPath))
-      return PHYSFS_ENUM_OK;
-    fullPath = (*data.pathTrans)[fullPath].c_str();
+  const char *fullPath;
+  if (!*dirpath) {
+    fullPath = filename;
+  } else {
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "%s/%s", dirpath, filename);
+    fullPath = buffer;
   }
 
   PHYSFS_File *phys = PHYSFS_openRead(fullPath);
@@ -586,9 +473,6 @@ openReadEnumCB(void *d, const char *dirpath, const char *filename) {
 
 void FileSystem::openRead(OpenHandler &handler, const char *filename) {
   std::string filename_nm = normalize(filename, false, false);
-  if (p->havePathCache)
-    for (char&c : filename_nm)
-      c = tolower(c);
 
   char buffer[512];
   size_t len = strcpySafe(buffer, filename_nm.c_str(), sizeof(buffer), -1);
@@ -611,22 +495,12 @@ void FileSystem::openRead(OpenHandler &handler, const char *filename) {
     file = delim + 1;
     dir = buffer;
   }
-  OpenReadEnumData data(handler, file, len + buffer - delim - !root,
-                        p->havePathCache ? &p->pathCache : 0);
+  OpenReadEnumData data(handler, file, len + buffer - delim - !root);
+  PHYSFS_enumerate(dir, openReadEnumCB, &data);
 
-  if (p->havePathCache) {
-    openReadEnumCB(&data, dir, file);
-    if (!data.stopSearching) {
-      char buffer[512];
-      for (const std::string& ext: p->extCache[filename_nm]) {
-        snprintf(buffer, sizeof(buffer), "%s.%s", file, ext.c_str());
-        openReadEnumCB(&data, dir, buffer);
-        if (data.stopSearching)
-          break;
-      }
-    }
-  } else {
-    PHYSFS_enumerate(dir, openReadEnumCB, &data);
+  /* try case-insensitive search if the case-sensitive one fails */
+  if (!data.stopSearching && strlen(dir)) {
+    PHYSFS_case_enumerate(dir, openReadEnumCB, &data);
   }
 
   if (data.physfsError)
@@ -655,14 +529,4 @@ std::string FileSystem::normalize(const char *pathname, bool preferred,
 
 bool FileSystem::exists(const char *filename) {
   return PHYSFS_exists(normalize(filename, false, false).c_str());
-}
-
-const char *FileSystem::desensitize(const char *filename) {
-  if (p->havePathCache) {
-    std::string normalized = p->toNorm(filename);
-    if (p->pathCache.contains(normalized)) {
-      return p->pathCache[normalized].c_str();
-    }
-  }
-  return filename;
 }
