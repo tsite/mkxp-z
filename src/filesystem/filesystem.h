@@ -69,10 +69,10 @@ public:
 	                 const char *filename,
 	                 bool freeOnClose = false);
 
-	std::string normalize(const char *pathname, bool preferred, bool absolute);
+	static std::string normalize(const char *pathname, bool preferred, bool absolute);
 
 	/* Does not perform extension supplementing */
-	bool exists(const char *filename);
+	static bool exists(const char *filename);
 
 private:
   std::map<std::string, std::map<std::string, std::vector<std::string>>> pathCache;
