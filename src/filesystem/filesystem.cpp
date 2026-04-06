@@ -359,11 +359,19 @@ struct PhysfsCaseCBData {
   void *data;
   std::string dir;
   int offset;
+  PHYSFS_EnumerateCallbackResult result;
 };
 
-static PHYSFS_EnumerateCallbackResult PHYSFS_case_cb(void *data, const char *, const char *fname) {
+static PHYSFS_EnumerateCallbackResult PHYSFS_case_cb(void *data, const char *dir, const char *fname) {
   PhysfsCaseCBData *cbd = static_cast<PhysfsCaseCBData *>(data);
-  assert(cbd->offset <= cbd->dir.length());
+  assert(cbd->offset <= cbd->dir.length() + 1);
+  if (cbd->result != PHYSFS_ENUM_OK) {
+    return cbd->result;
+  }
+  if (cbd->offset == cbd->dir.length() + 1) {
+    cbd->result = cbd->cb(cbd->data, dir, fname);
+    return cbd->result;
+  }
   if (strcasecmp(&cbd->dir[cbd->offset], fname)) {
     return PHYSFS_ENUM_OK;
   }
@@ -373,18 +381,14 @@ static PHYSFS_EnumerateCallbackResult PHYSFS_case_cb(void *data, const char *, c
   }
   strcpy(&cbd->dir[cbd->offset], fname);
   auto flen = strlen(fname);
-  if (cbd->dir.length() == cbd->offset + flen) {
-    PHYSFS_enumerate(cbd->dir.c_str(), cbd->cb, cbd->data);
-  } else {
-    cbd->offset += flen + 1;
-    PHYSFS_enumerate(cbd->dir.c_str(), PHYSFS_case_cb, cbd);
-    cbd->offset -= flen + 1;
-  }
+  cbd->offset += flen + 1;
+  PHYSFS_enumerate(cbd->dir.c_str(), PHYSFS_case_cb, cbd);
+  cbd->offset -= flen + 1;
   if (cbd->offset > 0) {
     assert(cbd->dir[cbd->offset-1] == '/');
     cbd->dir[cbd->offset-1] = 0;
   }
-  return PHYSFS_ENUM_OK;
+  return cbd->result;
 }
 
 /* Case-insensitive enumerate. Dir string does not support trailing slashes. */
@@ -392,7 +396,7 @@ static int PHYSFS_case_enumerate(const char *dir, PHYSFS_EnumerateCallback c, vo
   if (dir == nullptr || strlen(dir) == 0) {
     return PHYSFS_enumerate(dir, c, d);
   }
-  PhysfsCaseCBData data{c, d, dir, 0};
+  PhysfsCaseCBData data{c, d, dir, 0, PHYSFS_ENUM_OK};
   for (char &c : data.dir) if (c == '/') c = 0;
   return PHYSFS_enumerate("", PHYSFS_case_cb, &data);
 }
