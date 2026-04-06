@@ -336,10 +336,12 @@ static PHYSFS_EnumerateCallbackResult fontSetEnumCB(void *data, const char *dir,
   if (strcasecmp(ext, "ttf") && strcasecmp(ext, "otf"))
     return PHYSFS_ENUM_OK;
 
-  char filename[512];
-  snprintf(filename, sizeof(filename), "%s/%s", dir, fname);
+  std::string filename(dir);
+  filename.reserve(filename.size() + 1 + strlen(fname));
+  filename.push_back('/');
+  filename.append(fname);
 
-  PHYSFS_File *handle = PHYSFS_openRead(filename);
+  PHYSFS_File *handle = PHYSFS_openRead(filename.c_str());
 
   if (!handle)
     return PHYSFS_ENUM_ERROR;
@@ -357,48 +359,54 @@ static PHYSFS_EnumerateCallbackResult fontSetEnumCB(void *data, const char *dir,
 struct PhysfsCaseCBData {
   PHYSFS_EnumerateCallback cb;
   void *data;
-  std::string dir;
-  int offset;
-  PHYSFS_EnumerateCallbackResult result;
+  const std::vector<const char*>& path;
+  char dir[1024] = {0};
+  int index = 0;
+  PHYSFS_EnumerateCallbackResult result = PHYSFS_ENUM_OK;
 };
 
 static PHYSFS_EnumerateCallbackResult PHYSFS_case_cb(void *data, const char *dir, const char *fname) {
   PhysfsCaseCBData *cbd = static_cast<PhysfsCaseCBData *>(data);
-  assert(cbd->offset <= cbd->dir.length() + 1);
   if (cbd->result != PHYSFS_ENUM_OK) {
     return cbd->result;
   }
-  if (cbd->offset == cbd->dir.length() + 1) {
+  if (cbd->index == cbd->path.size()) {
     cbd->result = cbd->cb(cbd->data, dir, fname);
     return cbd->result;
   }
-  // TODO: should normalize fname before strcasecmp to convert nfc -> nfd
-  if (strcasecmp(&cbd->dir[cbd->offset], fname)) {
-    return PHYSFS_ENUM_OK;
+  {
+    std::string name = FileSystem::normalize(fname, false, false);
+    if (strcasecmp(cbd->path[cbd->index], name.c_str())) {
+      return PHYSFS_ENUM_OK;
+    }
   }
-  if (cbd->offset > 0) {
-    assert(cbd->dir[cbd->offset-1] == 0);
-    cbd->dir[cbd->offset-1] = '/';
+  size_t dlen = strlen(cbd->dir);
+  if(dlen + strlen(fname) + 2 > sizeof(cbd->dir)) {
+    throw Exception(Exception::PHYSFSError, "path too large: dir=%s, file=%s, %d > %d", cbd->dir, fname, dlen + strlen(fname) + 2, sizeof(cbd->dir));
   }
-  strcpy(&cbd->dir[cbd->offset], fname);
-  auto flen = strlen(fname);
-  cbd->offset += flen + 1;
-  PHYSFS_enumerate(cbd->dir.c_str(), PHYSFS_case_cb, cbd);
-  cbd->offset -= flen + 1;
-  if (cbd->offset > 0) {
-    assert(cbd->dir[cbd->offset-1] == '/');
-    cbd->dir[cbd->offset-1] = 0;
-  }
+  cbd->dir[dlen] = '/';
+  strcpy(&cbd->dir[dlen+1], fname);
+  cbd->index++;
+  PHYSFS_enumerate(cbd->dir, PHYSFS_case_cb, cbd);
+  cbd->index--;
+  cbd->dir[dlen] = 0;
   return cbd->result;
 }
 
-/* Case-insensitive enumerate. Dir string does not support trailing slashes. */
+/* Case-insensitive enumerate. Dir string does not support leading or trailing slashes. */
 static int PHYSFS_case_enumerate(const char *dir, PHYSFS_EnumerateCallback c, void *d) {
-  if (dir == nullptr || strlen(dir) == 0) {
+  if (dir == nullptr || dir[0] == 0) {
     return PHYSFS_enumerate(dir, c, d);
   }
-  PhysfsCaseCBData data{c, d, dir, 0, PHYSFS_ENUM_OK};
-  for (char &c : data.dir) if (c == '/') c = 0;
+  std::string dirString(dir);
+  std::vector<const char*> path = {dirString.c_str()};
+  for(char &c : dirString) {
+    if (c == '/') {
+      c = 0;
+      path.push_back(&c + 1);
+    }
+  }
+  PhysfsCaseCBData data{c, d, path};
   return PHYSFS_enumerate("", PHYSFS_case_cb, &data);
 }
 
@@ -423,11 +431,9 @@ struct OpenReadEnumData {
   const char *physfsError = nullptr;
 
   std::map<std::string, std::vector<std::string>>* files = nullptr;
-  
-  FileSystem &fp;
 
-  OpenReadEnumData(FileSystem::OpenHandler &handler, const char *filename, size_t filenameN, FileSystem &fp)
-      : handler(handler), filename(filename), filenameN(filenameN), fp(fp) {}
+  OpenReadEnumData(FileSystem::OpenHandler &handler, const char *filename)
+      : handler(handler), filename(filename), filenameN(strlen(filename)) {}
 };
 
 static PHYSFS_EnumerateCallbackResult
@@ -442,7 +448,7 @@ openReadEnumCB(void *d, const char *dirpath, const char *filename) {
     return PHYSFS_ENUM_OK;
 
   /* If there's not even a partial match, continue searching */
-  std::string name = data.fp.normalize(filename, false, false);
+  std::string name = FileSystem::normalize(filename, false, false);
   if (strncasecmp(name.c_str(), data.filename, data.filenameN) != 0)
     return PHYSFS_ENUM_OK;
 
@@ -454,16 +460,16 @@ openReadEnumCB(void *d, const char *dirpath, const char *filename) {
   if (name[data.filenameN] != '\0' && name.c_str() + data.filenameN + 1 != ext)
     return PHYSFS_ENUM_OK;
 
-  const char *fullPath;
+  PHYSFS_File *phys;
   if (!*dirpath) {
-    fullPath = filename;
+    phys = PHYSFS_openRead(filename);
   } else {
-    char buffer[512];
-    snprintf(buffer, sizeof(buffer), "%s/%s", dirpath, filename);
-    fullPath = buffer;
+    std::string fullPath(dirpath);
+    fullPath.reserve(fullPath.size() + 1 + strlen(filename));
+    fullPath.push_back('/');
+    fullPath.append(filename);
+    phys = PHYSFS_openRead(fullPath.c_str());
   }
-
-  PHYSFS_File *phys = PHYSFS_openRead(fullPath);
 
   if (!phys) {
     /* Ignore stale read errors - the file may have been deleted */
@@ -490,18 +496,16 @@ openReadEnumCB(void *d, const char *dirpath, const char *filename) {
 void FileSystem::openRead(OpenHandler &handler, const char *filename) {
   std::string filename_nm = normalize(filename, false, false);
 
-  char buffer[512];
-  size_t len = strcpySafe(buffer, filename_nm.c_str(), sizeof(buffer), -1);
   char *delim;
 
   /* Find the deliminator separating directory and file name */
-  for (delim = buffer + len; delim > buffer; --delim)
+  for (delim = &filename_nm.back(); delim > filename_nm.c_str(); --delim)
     if (*delim == '/')
       break;
 
-  const bool root = (delim == buffer);
+  const bool root = (delim == filename_nm.c_str());
 
-  const char *file = buffer;
+  const char *file = filename_nm.c_str();
   const char *dir = "";
 
   if (!root) {
@@ -509,10 +513,10 @@ void FileSystem::openRead(OpenHandler &handler, const char *filename) {
      * for both filename and directory path */
     *delim = '\0';
     file = delim + 1;
-    dir = buffer;
+    dir = filename_nm.c_str();
   }
 
-  OpenReadEnumData data(handler, file, len + buffer - delim - !root, *this);
+  OpenReadEnumData data(handler, file);
   
   /* first check if the path cache contains the file */
   std::string lowerDir = dir;
@@ -534,14 +538,14 @@ void FileSystem::openRead(OpenHandler &handler, const char *filename) {
     PHYSFS_enumerate(dir, openReadEnumCB, &data);
     if (data.physfsError)
       throw Exception(Exception::PHYSFSError, "PhysFS: %s, filename=%s", data.physfsError, filename);
-  }
-  
-  /* finally try case-insensitive search if the case-sensitive one fails */
-  if (!data.stopSearching && strlen(dir)) {
-    data.files->clear();
-    PHYSFS_case_enumerate(dir, openReadEnumCB, &data);
-    if (data.physfsError)
-      throw Exception(Exception::PHYSFSError, "PhysFS: %s, filename=%s", data.physfsError, filename);
+
+    /* finally try case-insensitive search if the case-sensitive one fails */
+    if (!data.stopSearching && strlen(dir)) {
+      data.files->clear();
+      PHYSFS_case_enumerate(dir, openReadEnumCB, &data);
+      if (data.physfsError)
+        throw Exception(Exception::PHYSFSError, "PhysFS: %s, filename=%s", data.physfsError, filename);
+    }
   }
 
   if (data.matchCount == 0)
@@ -560,9 +564,8 @@ void FileSystem::openReadRaw(SDL_RWops &ops, const char *filename,
     return;
 }
 
-std::string FileSystem::normalize(const char *pathname, bool preferred,
-                            bool absolute) {
-    return filesystemImpl::normalizePath(pathname, preferred, absolute);
+std::string FileSystem::normalize(const char *pathname, bool preferred, bool absolute) {
+  return filesystemImpl::normalizePath(pathname, preferred, absolute);
 }
 
 bool FileSystem::exists(const char *filename) {
