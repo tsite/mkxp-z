@@ -372,6 +372,7 @@ static PHYSFS_EnumerateCallbackResult PHYSFS_case_cb(void *data, const char *dir
     cbd->result = cbd->cb(cbd->data, dir, fname);
     return cbd->result;
   }
+  // TODO: should normalize fname before strcasecmp to convert nfc -> nfd
   if (strcasecmp(&cbd->dir[cbd->offset], fname)) {
     return PHYSFS_ENUM_OK;
   }
@@ -421,11 +422,12 @@ struct OpenReadEnumData {
    * doesn't get changed before we get back into our code */
   const char *physfsError = nullptr;
 
-  std::map<std::string, std::vector<std::string>>* files;
+  std::map<std::string, std::vector<std::string>>* files = nullptr;
+  
+  FileSystem &fp;
 
-  OpenReadEnumData(FileSystem::OpenHandler &handler, const char *filename,
-                   size_t filenameN, std::map<std::string, std::vector<std::string>>* files)
-      : handler(handler), filename(filename), filenameN(filenameN), files(files) {}
+  OpenReadEnumData(FileSystem::OpenHandler &handler, const char *filename, size_t filenameN, FileSystem &fp)
+      : handler(handler), filename(filename), filenameN(filenameN), fp(fp) {}
 };
 
 static PHYSFS_EnumerateCallbackResult
@@ -440,15 +442,16 @@ openReadEnumCB(void *d, const char *dirpath, const char *filename) {
     return PHYSFS_ENUM_OK;
 
   /* If there's not even a partial match, continue searching */
-  if (strncasecmp(filename, data.filename, data.filenameN) != 0)
+  std::string name = data.fp.normalize(filename, false, false);
+  if (strncasecmp(name.c_str(), data.filename, data.filenameN) != 0)
     return PHYSFS_ENUM_OK;
 
-  const char *ext = findExt(filename);
+  const char *ext = findExt(name.c_str());
 
   /* If fname matches up to a following '.' (meaning the rest is part
    * of the extension), or up to a following '\0' (full match), we've
    * found our file. We require the last '.' to match. */
-  if (filename[data.filenameN] != '\0' && filename + data.filenameN + 1 != ext)
+  if (name[data.filenameN] != '\0' && name.c_str() + data.filenameN + 1 != ext)
     return PHYSFS_ENUM_OK;
 
   const char *fullPath;
@@ -509,7 +512,7 @@ void FileSystem::openRead(OpenHandler &handler, const char *filename) {
     dir = buffer;
   }
 
-  OpenReadEnumData data(handler, file, len + buffer - delim - !root, nullptr);
+  OpenReadEnumData data(handler, file, len + buffer - delim - !root, *this);
   
   /* first check if the path cache contains the file */
   std::string lowerDir = dir;
