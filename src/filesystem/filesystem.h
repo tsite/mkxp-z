@@ -24,6 +24,8 @@
 
 #include <SDL_rwops.h>
 #include <string>
+#include <vector>
+#include <map>
 
 #include "filesystemImpl.h"
 
@@ -71,6 +73,9 @@ public:
 
 	/* Does not perform extension supplementing */
 	bool exists(const char *filename);
+
+private:
+  std::map<std::string, std::map<std::string, std::vector<std::string>>> pathCache;
 };
 
 extern const Uint32 SDL_RWOPS_PHYSFS;
