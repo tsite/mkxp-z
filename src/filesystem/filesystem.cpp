@@ -395,7 +395,7 @@ static PHYSFS_EnumerateCallbackResult PHYSFS_case_cb(void *data, const char *dir
 
 /* Case-insensitive enumerate. Dir string does not support leading or trailing slashes. */
 static int PHYSFS_case_enumerate(const char *dir, PHYSFS_EnumerateCallback c, void *d) {
-  if (dir == nullptr || dir[0] == 0) {
+  if (!dir || !dir[0]) {
     return PHYSFS_enumerate(dir, c, d);
   }
   std::string dirString(dir);
@@ -418,78 +418,56 @@ struct OpenReadEnumData {
   FileSystem::OpenHandler &handler;
   SDL_RWops ops{};
 
-  /* The filename (without directory) we're looking for */
-  const char *filename = nullptr;
-  size_t filenameN = 0;
+  std::map<std::string, std::vector<std::string>>& files;
 
-  /* Number of files we've attempted to read and parse */
-  size_t matchCount = 0;
-  bool stopSearching = false;
+  bool readFile(const char *filename, bool ignorePhysfsError) {
+    std::string fname(filename);
+    for(char &c : fname) c = tolower(c);
+    for(const std::string &file : files[fname]) {
+      PHYSFS_File *phys = PHYSFS_openRead(file.c_str());
+      if (!phys) {
+        /* Failing to open this file here means there must
+         * be a deeper rooted problem somewhere within PhysFS.
+         * Just abort all together. */
+        if (!ignorePhysfsError)
+          throw Exception(Exception::PHYSFSError, "PhysFS: %s, file=%s", PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()), file.c_str());
+        continue;
+      }
+      initReadOps(phys, ops, false);
 
-  /* In case of a PhysFS error, save it here so it
-   * doesn't get changed before we get back into our code */
-  const char *physfsError = nullptr;
+      const char *ext = findExt(file.c_str());
+      if (handler.tryRead(ops, ext ? ext : ""))
+        return true;
+    }
+    return false;
+  }
 
-  std::map<std::string, std::vector<std::string>>* files = nullptr;
-
-  OpenReadEnumData(FileSystem::OpenHandler &handler, const char *filename)
-      : handler(handler), filename(filename), filenameN(strlen(filename)) {}
+  OpenReadEnumData(FileSystem::OpenHandler &handler, std::map<std::string, std::vector<std::string>>& files)
+      : handler(handler), files(files) {}
 };
 
 static PHYSFS_EnumerateCallbackResult
 openReadEnumCB(void *d, const char *dirpath, const char *filename) {
   OpenReadEnumData &data = *static_cast<OpenReadEnumData *>(d);
-  if (data.files) {
-    (*data.files)[dirpath].push_back(filename);
+
+  std::string fullPath;
+  if (dirpath) {
+    fullPath.reserve(strlen(dirpath) + 1 + strlen(filename));
+    fullPath.append(dirpath);
+    fullPath.push_back('/');
   }
+  fullPath.append(filename);
 
-  /* Read through all files in the folder even after the target is found */
-  if (data.stopSearching)
-    return PHYSFS_ENUM_OK;
-
-  /* If there's not even a partial match, continue searching */
   std::string name = FileSystem::normalize(filename, false, false);
-  if (strncasecmp(name.c_str(), data.filename, data.filenameN) != 0)
-    return PHYSFS_ENUM_OK;
+  for (char &c : name) c = tolower(c);
+
+  data.files[name].push_back(fullPath);
 
   const char *ext = findExt(name.c_str());
-
-  /* If fname matches up to a following '.' (meaning the rest is part
-   * of the extension), or up to a following '\0' (full match), we've
-   * found our file. We require the last '.' to match. */
-  if (name[data.filenameN] != '\0' && name.c_str() + data.filenameN + 1 != ext)
-    return PHYSFS_ENUM_OK;
-
-  PHYSFS_File *phys;
-  if (!*dirpath) {
-    phys = PHYSFS_openRead(filename);
-  } else {
-    std::string fullPath(dirpath);
-    fullPath.reserve(fullPath.size() + 1 + strlen(filename));
-    fullPath.push_back('/');
-    fullPath.append(filename);
-    phys = PHYSFS_openRead(fullPath.c_str());
+  if (ext) {
+    data.files[std::string(name.c_str(), ext-1)].push_back(fullPath);
   }
 
-  if (!phys) {
-    /* Ignore stale read errors - the file may have been deleted */
-    if (!data.files) {
-      return PHYSFS_ENUM_OK;
-    }
-    /* Failing to open this file here means there must
-     * be a deeper rooted problem somewhere within PhysFS.
-     * Just abort alltogether. */
-    data.stopSearching = true;
-    data.physfsError = PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode());
-
-    return PHYSFS_ENUM_ERROR;
-  }
-  initReadOps(phys, data.ops, false);
-
-  if (data.handler.tryRead(data.ops, ext))
-    data.stopSearching = true;
-
-  ++data.matchCount;
   return PHYSFS_ENUM_OK;
 }
 
@@ -516,46 +494,38 @@ void FileSystem::openRead(OpenHandler &handler, const char *filename) {
     dir = filename_nm.c_str();
   }
 
-  OpenReadEnumData data(handler, file);
-  
-  /* first check if the path cache contains the file */
   std::string lowerDir = dir;
   for (char &c : lowerDir) c = tolower(c);
-  for (auto &v : pathCache[lowerDir]) {
-    for (auto &file : v.second) {
-      openReadEnumCB(&data, v.first.c_str(), file.c_str());
-      if (data.stopSearching) break;
-    }
-    if (data.stopSearching) break;
-  }
-  if (data.physfsError)
-    throw Exception(Exception::PHYSFSError, "PhysFS: %s, filename=%s", data.physfsError, filename);
+  OpenReadEnumData data(handler, pathCache[lowerDir]);
+
+  /* first check if the path cache contains the file, ignoring any physfs errors */
+  if (data.readFile(file, true))
+    return;
 
   /* next update the cache via case-sensitive search & try again */
-  if (!data.stopSearching) {
-    data.files = &pathCache[lowerDir];
-    data.files->clear();
-    PHYSFS_enumerate(dir, openReadEnumCB, &data);
-    if (data.physfsError)
-      throw Exception(Exception::PHYSFSError, "PhysFS: %s, filename=%s", data.physfsError, filename);
+  data.files.clear();
+  PHYSFS_enumerate(dir, openReadEnumCB, &data);
+  if (data.readFile(file, false))
+    return;
 
-    /* finally try case-insensitive search if the case-sensitive one fails */
-    if (!data.stopSearching && strlen(dir)) {
-      data.files->clear();
-      PHYSFS_case_enumerate(dir, openReadEnumCB, &data);
-      if (data.physfsError)
-        throw Exception(Exception::PHYSFSError, "PhysFS: %s, filename=%s", data.physfsError, filename);
-    }
+  /* finally try case-insensitive search if the case-sensitive one fails */
+  if (strlen(dir)) {
+    data.files.clear();
+    PHYSFS_case_enumerate(dir, openReadEnumCB, &data);
+    if (data.readFile(file, false))
+      return;
   }
 
-  if (data.matchCount == 0)
-    throw Exception(Exception::NoFileError, "%s", filename);
+  throw Exception(Exception::NoFileError, "%s", filename);
 }
 
 void FileSystem::openReadRaw(SDL_RWops &ops, const char *filename,
                              bool freeOnClose) {
 
-  PHYSFS_File *handle = PHYSFS_openRead(normalize(filename, 0, 0).c_str());
+  PHYSFS_File *handle = PHYSFS_openRead(filename);
+
+  if (!handle)
+    handle = PHYSFS_openRead(normalize(filename, 0, 0).c_str());
 
   if (!handle)
     throw Exception(Exception::NoFileError, "%s", filename);
