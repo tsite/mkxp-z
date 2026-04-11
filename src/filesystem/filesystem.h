@@ -75,6 +75,7 @@ public:
 	static bool exists(const char *filename);
 
 private:
+  // normalized, lowercase folder -> normalized, lowercase file -> full paths
   std::map<std::string, std::map<std::string, std::vector<std::string>>> pathCache;
 };
 
